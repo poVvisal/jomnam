@@ -1,0 +1,108 @@
+name: CD Pipeline to Google Cloud Run (staging & production)
+
+on:
+  push:
+    branches:
+      - staging
+  workflow_dispatch: {}
+  release:
+    types: [published]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: docker.io/${{ vars.IMAGE }}:${{ github.sha }}
+  BACKEND_PORT: 3001
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    name: Lint, test & build
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+
+      - name: Install & Test Backend
+        run: |
+          cd backend
+          npm ci
+          npm test
+
+      - name: Install & Build Frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+          npm test -- --watchAll=false --passWithNoTests
+
+  build-and-deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    name: Build & Deploy
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and Push Docker Image
+        run: |
+          docker build -t ${{ env.IMAGE }} .
+          docker push ${{ env.IMAGE }}
+          echo "Built & Pushed image → ${{ env.IMAGE }}"
+
+      # ────────────────────────────────────────────────
+      # Staging Deployment (Using Official Action v3)
+      # ────────────────────────────────────────────────
+      - name: Deploy → Staging
+        if: github.ref == 'refs/heads/staging'
+        uses: google-github-actions/deploy-cloudrun@v3
+        with:
+          service: ${{ vars.GCR_STAGING_PROJECT_NAME }}
+          image: ${{ env.IMAGE }}
+          region: ${{ vars.GCR_REGION }}
+          flags: '--allow-unauthenticated --port=${{ env.BACKEND_PORT }} --min-instances=0 --max-instances=5 --memory=512Mi --cpu=1 --timeout=300s'
+          env_vars: |
+            MONGO_URI=${{ secrets.MONGO_URI_STAGING }}
+            NODE_ENV=staging
+
+      # ────────────────────────────────────────────────
+      # Production Deployment (Using Official Action v3)
+      # ────────────────────────────────────────────────
+      - name: Deploy → Production
+        if: github.event_name == 'release' && github.event.action == 'published'
+        uses: google-github-actions/deploy-cloudrun@v3
+        with:
+          service: ${{ vars.GCR_PROJECT_NAME }}
+          image: ${{ env.IMAGE }}
+          region: ${{ vars.GCR_REGION }}
+          flags: '--allow-unauthenticated --port=${{ env.BACKEND_PORT }} --min-instances=1 --max-instances=10 --memory=512Mi --cpu=1 --timeout=300s'
+          env_vars: |
+            MONGO_URI=${{ secrets.MONGO_URI }}
+            NODE_ENV=production

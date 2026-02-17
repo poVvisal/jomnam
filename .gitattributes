@@ -1,0 +1,6 @@
+# Force LF line endings for shell scripts and CI/CD workflow files
+# to prevent \r breaking bash line continuations on Linux runners
+*.yml text eol=lf
+*.yaml text eol=lf
+*.sh text eol=lf
+Dockerfile text eol=lf
